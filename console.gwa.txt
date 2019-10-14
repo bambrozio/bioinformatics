@@ -1,0 +1,27 @@
+> # Run GWAS analysis
+> # Note: This function writes a file, but does not produce an R object
+> start <- Sys.time()
+> GWAA(genodata=genotype, phenodata=phenoSub, filename=gwaa.fname)
+656890  SNPs included in analysis.
+1309 samples included in analysis.
+socket cluster with 2 nodes on host ‘localhost’
+GWAS SNPs 1-65689 (10% finished)
+GWAS SNPs 65690-131378 (20% finished)
+GWAS SNPs 131379-197067 (30% finished)
+GWAS SNPs 197068-262756 (40% finished)
+GWAS SNPs 262757-328445 (50% finished)
+GWAS SNPs 328446-394134 (60% finished)
+GWAS SNPs 394135-459823 (70% finished)
+GWAS SNPs 459824-525512 (80% finished)
+GWAS SNPs 525513-591201 (90% finished)
+GWAS SNPs 591202-656890 (100% finished)
+[1] "Done."
+Warning messages:
+1: In GWAA(genodata = genotype, phenodata = phenoSub, filename = gwaa.fname) :
+  Number of samples mismatch. Using subset found in phenodata.
+2: closing unused connection 4 (<-localhost:11080) 
+3: closing unused connection 3 (<-localhost:11080) 
+> end <- Sys.time()
+> print(end-start)
+Time difference of 1.433755 hours
+> save(genotype, genoBim, clinical, pcs, imputed, target, rules, phenoSub, support, file=working.data.fname(7))
