@@ -88,14 +88,21 @@ working.data.fname <- function(num)
 # Installing necessary packages (Via console, line by line)
 # ===========================================================
 # source("http://bioconductor.org/biocLite.R")
-# biocLite("snpStats")
-# biocLite("SNPRelate")
-# biocLite("rtracklayer")
-# biocLite("biomaRt")
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install()
+# BiocManager::install(
+#   c("snpStats",
+#     "AnnotationDbi",
+#     "SNPRelate",
+#     "rtracklayer",
+#     "biomaRt"))
+# 
 # install.packages(c('plyr', 'GenABEL', 'LDheatmap','doParallel', 'ggplot2', 'coin', 'igraph', 'devtools', 'downloader'))
-
 # library(devtools)
 # install_url("https://cran.r-project.org/src/contrib/Archive/postgwas/postgwas_1.11.tar.gz")
+# install_url("https://cran.r-project.org/src/contrib/Archive/GenABEL.data/GenABEL.data_1.0.0.tar.gz")
+# install_url("https://cran.r-project.org/src/contrib/Archive/GenABEL/GenABEL_1.8-0.tar.gz")
 ```
 
 ## Files and variables of interest
@@ -184,8 +191,7 @@ print(genotype) # 658186 SNPs remain
 save(genotype, snpsum.col, genoBim, clinical, file=working.data.fname(2))
 
 # Sample level filtering
-# TODO: Fix issue: No such file or directory
-# source("globals.R")
+source("globals.R")
 
 # load data created in previous snippets
 load(working.data.fname(2))
@@ -601,3 +607,57 @@ GWAA <- function(genodata=genotypes,
     return(print("Done."))
 }
 ```
+
+### Phenotype data preparation
+1. Create a data frame of phenotype features
+    * clinical features + first ten principal components.
+1. The HDL feature is normalized using a rank-based inverse normal transform.
+1. Remove unneded variables for the GWA analysis.
+1. Remove samples with missing normalized HDL data.
+```{r}
+library(GenABEL)
+# TODO: Fix me: cannot open file 'GWAA.R': No such file or directory
+#source("GWAA.R")
+
+# Merge clincal data and principal components to create phenotype table
+phenoSub <- merge(clinical,pcs)      # data.frame => [ FamID CAD sex age hdl pc1 pc2 ... pc10 ]
+
+# We will do a rank-based inverse normal transformation of hdl
+phenoSub$phenotype <- rntransform(phenoSub$hdl, family="gaussian")
+
+# TODO: Plot interactive with plotly
+# Show that the assumptions of normality met after transformation
+par(mfrow=c(1,2))
+hist(phenoSub$hdl, main="Histogram of HDL", xlab="HDL")
+hist(phenoSub$phenotype, main="Histogram of Tranformed HDL", xlab="Transformed HDL")
+
+# Remove unnecessary columns from table
+phenoSub$hdl <- NULL
+phenoSub$ldl <- NULL
+phenoSub$tg <- NULL
+phenoSub$CAD <- NULL
+
+# Rename columns to match names necessary for GWAS() function
+cnames <- colnames(phenoSub)
+cnames[1] <- 'id'
+colnames(phenoSub) <- cnames
+
+# Include only subjects with hdl data
+phenoSub<-phenoSub[!is.na(phenoSub$phenotype),]
+# 1309 subjects included with phenotype data
+
+print(head(phenoSub))
+```
+
+### Parallel model fitting
+* Perform model fitting on each of the typed SNPs in the genotype object and write the results to a .txt file.
+```{r}
+# Run GWAS analysis
+# Note: This function writes a file, but does not produce an R object
+start <- Sys.time()
+GWAA(genodata=genotype, phenodata=phenoSub, filename=gwaa.fname)
+end <- Sys.time()
+print(end-start)
+save(genotype, genoBim, clinical, pcs, imputed, target, rules, phenoSub, support, file=working.data.fname(7))
+```
+
