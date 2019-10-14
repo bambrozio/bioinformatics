@@ -355,3 +355,115 @@ print(genotype) # 656890 SNPs remain
 # Overwrite old genotype with new filtered version
 save(genotype, genoBim, clinical, file=working.data.fname(4))
 ```
+
+## New data generation
+### Re-compute PCA
+* Calculate principal components to be included as covariates in the GWA models.
+    * Adjust for remaining substructure that may confound SNP level association.
+    * LD pruning, then ancestry filtering to calculate PCs using the `snpgdsPCA` function on the filtered genotype data set. (using the first 10 principal components in GWA models).
+```{r}
+genofile <- openfn.gds(gwas.fn$gds, readonly = FALSE)
+
+# Set LD threshold to 0.2
+ld.thresh <- 0.2
+set.seed(1000)
+geno.sample.ids <- rownames(genotype)
+snpSUB <- snpgdsLDpruning(genofile,
+                          ld.threshold = ld.thresh,
+                          sample.id = geno.sample.ids, # Only analyze the filtered samples
+                          snp.id = colnames(genotype)) # Only analyze the filtered SNPs
+
+snpset.pca <- unlist(snpSUB, use.names=FALSE)
+cat(length(snpset.pca),"\n")  #72578 SNPs will be used in PCA analysis
+
+pca <- snpgdsPCA(genofile, sample.id = geno.sample.ids,  snp.id = snpset.pca, num.thread=1)
+
+# TODO: Should plot scree plot first, before choosing the 10 first PC's
+# Find and record first 10 principal components
+# pcs will be a N:10 matrix.  Each column is a principal component.
+pcs <- data.frame(FamID = pca$sample.id, pca$eigenvect[,1 : 10],
+                  stringsAsFactors = FALSE)
+colnames(pcs)[2:11]<-paste("pc", 1:10, sep = "")
+
+print(head(pcs))
+
+# Close GDS file
+closefn.gds(genofile)
+
+# Store pcs for future reference with the rest of the derived data
+save(genotype, genoBim, clinical, pcs, file=working.data.fname(5))
+```
+
+### Imputation of SNPs
+1. In addition to the genotyped SNPs from the study, impute SNPs on chromosome 16. (as it is useful to extend the analysis to other known SNPs)
+1. Performance of genotype imputation requires reference data. Using the [HapMap 1000 Genomes data](https://www.internationalgenome.org/category/hapmap/).
+    * Derive imputation "rules" for the additional SNPs that were not typed in the study using `snp.imputation` based on the genotypes from the 1000 Genomes data. Each rule represents a predictive model for genotypes of untyped SNPs associated with near-by typed SNPs. Using these rules, calculate the expected posterior value of the non-typed SNPs using the impute function from SNPRelate.
+1. Remove un-typed SNPs in which it fails to derive imputation "rules".
+1. Filter out SNPs that have low estimated MAF, and low imputation accuracy.
+    * The latter is based on the R2 value of the model estimated by the `snp.imputation` function.
+```{r}
+# Read in 1000g data for given chromosome 16
+thougeno <- read.pedfile(onethou.fn$ped, snps = onethou.fn$info, which=1)
+
+# Obtain genotype data for given chromosome
+genoMatrix <- thougeno$genotypes
+
+# Obtain the chromosome position for each SNP
+support <- thougeno$map
+colnames(support)<-c("SNP", "position", "A1", "A2")
+head(support)
+
+# Imputation of non-typed 1000g SNPs
+presSnps <- colnames(genotype)
+
+# Subset for SNPs on given chromosome
+presSnps <- colnames(genotype)
+presDatChr <- genoBim[genoBim$SNP %in% presSnps & genoBim$chr==16, ]
+targetSnps <- presDatChr$SNP
+
+# Subset 1000g data for our SNPs
+# "missing" and "present" are snpMatrix objects needed for imputation rules
+is.present <- colnames(genoMatrix) %in% targetSnps
+
+missing <- genoMatrix[,!is.present]
+print(missing) # Almost 400,000 SNPs
+
+present <- genoMatrix[,is.present]
+print(present) # Our typed SNPs
+
+# Obtain positions of SNPs to be used for imputation rules
+pos.pres <- support$position[is.present]
+pos.miss <- support$position[!is.present]
+
+# Calculate and store imputation rules using snp.imputation()
+rules <- snp.imputation(present, missing, pos.pres, pos.miss)
+
+# Remove failed imputations
+rules <- rules[can.impute(rules)]
+cat("Imputation rules for", length(rules), "SNPs were estimated\n")  # Imputation rules for 197888 SNPs were estimated
+
+# Quality control for imputation certainty and MAF
+# Set thresholds
+r2threshold <- 0.7
+minor <- 0.01
+
+# Filter on imputation certainty and MAF
+rules <- rules[imputation.r2(rules) >= r2threshold]
+
+cat(length(rules),"imputation rules remain after imputations with low certainty were removed\n")  # 162565 imputation rules remain after imputations with low certainty were removed
+
+rules <- rules[imputation.maf(rules) >= minor]
+cat(length(rules),"imputation rules remain after MAF filtering\n")  # 162565 imputation rules remain after MAF filtering
+
+# Obtain posterior expectation of genotypes of imputed snps
+target <- genotype[,targetSnps]
+imputed <- impute.snps(rules, target, as.numeric=FALSE)
+print(imputed)  # 162565 SNPs were imputed
+
+rm(genoMatrix)
+rm(missing)
+rm(present)
+
+# Add new imputed, target and rules data to saved results
+save(genotype, genoBim, clinical, pcs, imputed, target, rules, support, file=working.data.fname(6))
+```
