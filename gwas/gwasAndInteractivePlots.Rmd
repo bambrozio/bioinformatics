@@ -1,0 +1,357 @@
+---
+title: "GWAS Analysis & Interactive plots"
+author: "Bruno Ambrozio"
+date: "11/10/2019"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T)
+```
+## Description 
+* A [GWAS](https://en.wikipedia.org/wiki/Genome-wide_association_study) analysis, with post-analytic visualization and interrogation.
+    * Analysis steps derived from the paper: ["A guide to genome-wide association analysis and post-analytic interrogation" (doi: 10.1002/sim.6605)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5019244/) (Reed et al., 2015).
+    * Dataset from the PennCATH study of coronary artery disease (CAD). Paper: ["Identification of ADAMTS7 as a novel locus for coronary atherosclerosis and association of ABO with myocardial infarction in the presence of coronary atherosclerosis: two genome-wide association studies." (doi: 10.1016/S0140-6736(10)61996-4)](http://www.ncbi.nlm.nih.gov/pubmed/21239051) ((Reilly et al., 2011))
+    * Detailed tutorial can be found [here](http://www.stat-gen.org/tut/tut_intro.html)
+
+## Summary
+
+1. Download necessary R packages and setting global parameters to save progress while working through the GWA analysis.
+1. Include quality control steps for both SNP and sample level filtering. * [PCA](https://en.wikipedia.org/wiki/Principal_component_analysis) for [population stratification](https://en.wikipedia.org/wiki/Population_stratification) in statistical modeling, as well as imputation of non-typed SNPs using 1000 Genomes reference genotype data.
+1. GWAS analysis' strategies.
+    * Basic linear modeling functionality.
+    * Imputed data using functionality contained.
+1. Post-analytic interrogation.
+    * Performance of statistical models.
+    * Visualization of the global and subsetted GWAS output.
+```{r}
+# Configuring global parameters
+# ===========================================================
+
+# Set workdir
+setwd("~/workspace/github.com/bambrozio/bioinformatics/gwas")
+
+# location of the files to be downloaded/saved throughout the GWAS
+data.dir <- '/Users/bambrozi/Downloads/gwas_cad_data'
+out.dir <- data.dir # may want to write to a separate dir to avoid clutter
+
+# Download files
+urlSupport <- "https://www.mtholyoke.edu/courses/afoulkes/Data/GWAStutorial/GWASTutorial_Files.zip"
+zipSupport.fn <- sprintf("%s/GWAStutorial_Files.zip", data.dir) 
+
+# Input files
+gwas.fn <- lapply(
+  c(bed='bed', bim='bim', fam='fam', gds='gds'),
+  function(n)
+    sprintf("%s/GWAStutorial.%s", data.dir, n))
+
+clinical.fn <- sprintf("%s/GWAStutorial_clinical.csv", data.dir) 
+
+onethou.fn <- lapply(c(info='info',ped='ped'),
+                     function(n)
+                       sprintf("%s/chr16_1000g_CEU.%s", data.dir, n))
+
+protein.coding.coords.fname <- sprintf("%s/ProCodgene_coords.csv",
+                                       data.dir)
+
+# Output files
+gwaa.fname <- sprintf("%s/GWAStutorialout.txt", out.dir)
+gwaa.unadj.fname <- sprintf("%s/GWAStutorialoutUnadj.txt", out.dir)
+impute.out.fname <- sprintf("%s/GWAStutorial_imputationOut.csv", out.dir)
+CETP.fname <- sprintf("%s/CETP_GWASout.csv", out.dir)
+
+# Working data saved between each code snippet so each can run independently.
+# Use save(data, file=working.data.fname(num))
+working.data.fname <- function(num)
+  { sprintf("%s/working.%s.Rdata", out.dir, num) }
+```
+
+## Preliminary
+* Install packages:
+    * [Bioconductor](http://www.bioconductor.org/).
+        * [snpStats](http://www.bioconductor.org/packages/release/bioc/html/snpStats.html).
+            * Read in various formats of genotype data.
+            * Qality control.
+            * Imputation and association analysis.
+        * [SNPRelate](http://master.bioconductor.org/packages/release/bioc/html/SNPRelate.html).
+          * Sample level quality control.
+          * Cmputationally efficient principal component calculation.
+    * [LDheatmap](http://cran.r-project.org/web/packages/LDheatmap/index.html) and [postgwas](http://journals.plos.org/plosone/article?id=10.1371/journal.pone.0071775).
+        * Data visualization.
+    * [plyr](http://plyr.had.co.nz/).
+        * Data manipulation.
+    * [genABEL](http://www.genabel.org/).
+        * Statistical calculation.
+    * [doParallel](http://cran.r-project.org/web/packages/doParallel/index.html).
+        * parallel processing.
+
+```{r}
+# Installing necessary packages (Via console, line by line)
+# ===========================================================
+# source("http://bioconductor.org/biocLite.R")
+# biocLite("snpStats")
+# biocLite("SNPRelate")
+# biocLite("rtracklayer")
+# biocLite("biomaRt")
+# install.packages(c('plyr', 'GenABEL', 'LDheatmap','doParallel', 'ggplot2', 'coin', 'igraph', 'devtools', 'downloader'))
+
+# library(devtools)
+# install_url("https://cran.r-project.org/src/contrib/Archive/postgwas/postgwas_1.11.tar.gz")
+```
+
+## Files and variables of interest
+* Files formatted for [PLINK](http://zzz.bwh.harvard.edu/plink/).
+    * .bed: binary genotype information
+    * .bim: SNP's data.
+        * Columns: chromosome, SNP name, genetic distance, chromosomal position, identity of allele 1 (pertains to the minor, or less common allele), identity of allele 2.
+    * .fam: samples' information.
+        * Columns: family ID, individual ID, paternal ID, maternal ID, sex (1 = male, 2 = female), and phenotype.
+    * .CSV: A supplemental clinical file for outcome variables and additional covariates.
+        * Columns: sample ID (Family ID in the .fam file), coronary artery disease status (0 = control, 1 = affected), sex (1 = male, 2 = female), age (years), triglyceride level (mg/dL), high-density lipoprotein level (mg/dL), low-density lipoprotein level (mg/dL).
+```{r}
+# Downloading support files
+# ===========================================================
+
+# TODO: Change to download only if it was not previously downloaded.
+# Download and unzip data needed for this tutorial
+# library(downloader)
+
+# download(urlSupport, zipSupport.fn)
+# unzip(zipSupport.fn, exdir = data.dir)
+
+library(snpStats)
+
+# Read in PLINK files
+geno <- read.plink(gwas.fn$bed, gwas.fn$bim, gwas.fn$fam, na.strings = ("-9"))
+```
+
+## Data pre-processing
+* The `geno` object contains a `genotype` member of type `SnpMatrix` where each column is a SNP and each row is a sample. For convenience, we assign that to the object, `genotype`.
+* Filter the `genotype` data to only include samples with corresponding clinical data.
+
+```{r}
+# Obtain the SnpMatrix object (genotypes) table from geno list
+# Note: Phenotypes and covariates will be read from the clinical data file, below
+genotype <- geno$genotype
+print(genotype) # 861473 SNPs read in for 1401 subjects
+
+#Obtain the SNP information from geno list
+genoBim <- geno$map
+colnames(genoBim) <- c("chr", "SNP", "gen.dist", "position", "A1", "A2")
+print(head(genoBim))
+
+# Remove raw file to free up memory
+rm(geno)
+
+# Read in clinical file
+clinical <- read.csv(clinical.fn,
+                     colClasses=c("character", "factor", "factor", rep("numeric", 4)))
+rownames(clinical) <- clinical$FamID
+print(head(clinical))
+
+# Subset genotype for subject data
+genotype <- genotype[clinical$FamID, ]
+print(genotype)  # Tutorial: All 1401 subjects contain both clinical and genotype data
+
+# Write genotype, genoBim, clinical for future use
+save(genotype, genoBim, clinical, file = working.data.fname(1))
+```
+### SNP level filtering
+* Remove SNPs that fail to meet minimum criteria due to missing data, low variability or genotyping errors.
+```{r}
+# Create SNP summary statistics (MAF, call rate, etc.)
+snpsum.col <- col.summary(genotype)
+print(head(snpsum.col))
+```
+* Keep the subset of SNPs that meet minimum call rate and [MAF](https://en.wikipedia.org/wiki/Minor_allele_frequency) criterias.
+```{r}
+# Setting thresholds (alphas)
+call <- 0.95
+minor <- 0.01
+
+# Filter on MAF and call rate
+use <- with(snpsum.col, (!is.na(MAF) & MAF > minor) & Call.rate >= call)
+use[is.na(use)] <- FALSE                # Remove NA's as well
+
+cat(ncol(genotype)-sum(use),"SNPs will be removed due to low MAF or call rate.\n") #203287 SNPs will be removed
+
+# Subset genotype and SNP summary data for SNPs that pass call rate and MAF criteria
+genotype <- genotype[,use]
+snpsum.col <- snpsum.col[use,]
+
+print(genotype) # 658186 SNPs remain
+
+# Write subsetted genotype data and derived results for future use
+save(genotype, snpsum.col, genoBim, clinical, file=working.data.fname(2))
+
+# Sample level filtering
+# TODO: Fix issue: No such file or directory
+# source("globals.R")
+
+# load data created in previous snippets
+load(working.data.fname(2))
+
+library(snpStats)
+```
+
+### Basic sample filtering
+* `row.summary` for sample level quality control for missing data and heterozygosity
+    * Additional heterozygosity F statistic:
+        * `|F|=(1−O/E)`, where:
+            * O = observed proportion of heterozygous genotypes for a given sample.
+            * E = expected proportion of heterozygous genotypes for a given sample, based on the MAF across all non-missing SNPs for a given sample.
+```{r}
+library(SNPRelate) # LD pruning, relatedness, PCA
+library(plyr)
+
+# Create sample statistics (Call rate, Heterozygosity)
+snpsum.row <- row.summary(genotype)
+
+# Add the F stat (inbreeding coefficient) to snpsum.row
+MAF <- snpsum.col$MAF
+callmatrix <- !is.na(genotype)
+hetExp <- callmatrix %*% (2*MAF*(1-MAF))
+hetObs <- with(snpsum.row, Heterozygosity*(ncol(genotype))*Call.rate)
+snpsum.row$hetF <- 1-(hetObs/hetExp)
+
+head(snpsum.row)
+```
+* Apply filtering on call rate and heterozygosity, selecting only those samples that meet the criteria.
+```{r}
+# Setting thresholds
+sampcall <- 0.95 # Sample call rate cut-off
+hetcutoff <- 0.1 # Inbreeding coefficient cut-off
+
+sampleuse <- with(snpsum.row, !is.na(Call.rate) & Call.rate > sampcall & abs(hetF) <= hetcutoff)
+sampleuse[is.na(sampleuse)] <- FALSE    # remove NA's as well
+cat(nrow(genotype)-sum(sampleuse), "subjects will be removed due to low sample call rate or inbreeding coefficient.\n") #0 subjects removed
+
+# Subset genotype and clinical data for subjects who pass call rate and heterozygosity crtieria
+genotype <- genotype[sampleuse,]
+clinical<- clinical[ rownames(genotype), ]
+```
+### [Identity-by-descent](https://en.wikipedia.org/wiki/Identity_by_descent) analysis
+* Filter on relatedness criteria (demands GDS file format)
+* `SNPRelate` package to perform IBD analysis on a subset of SNPs that are in linkage equilibrium by iteratively removing adjacent SNPs that exceed an [LD](https://en.wikipedia.org/wiki/Linkage_disequilibrium) threshold in a [sliding window](https://stackoverflow.com/a/8269948/7224879) using the `snpgdsLDpruning` function.
+```{r}
+# Checking for Relatedness
+
+ld.thresh <- 0.2 # LD cut-off
+kin.thresh <- 0.1 # Kinship cut-off
+
+# Create gds file, required for SNPRelate functions
+snpgdsBED2GDS(gwas.fn$bed, gwas.fn$fam, gwas.fn$bim, gwas.fn$gds)
+
+genofile <- openfn.gds(gwas.fn$gds, readonly = FALSE)
+
+# Automatically added "-1" sample suffixes are removed
+gds.ids <- read.gdsn(index.gdsn(genofile, "sample.id"))
+gds.ids <- sub("-1", "", gds.ids)
+add.gdsn(genofile, "sample.id", gds.ids, replace = TRUE)
+
+#Prune SNPs for IBD analysis
+set.seed(1000)
+geno.sample.ids <- rownames(genotype)
+snpSUB <- snpgdsLDpruning(
+  genofile,
+  ld.threshold = ld.thresh,
+  sample.id = geno.sample.ids, # Only analyze the filtered samples
+  snp.id = colnames(genotype)) # Only analyze the filtered SNPs
+
+snpset.ibd <- unlist(snpSUB, use.names=FALSE)
+cat(length(snpset.ibd),"will be used in IBD analysis\n")  # Tutorial: expect 72812 SNPs
+```
+* `snpgdsIBDMoM` function computes the IBD coefficients using method of moments. The result is a table indicating kinship among pairs of samples.
+```{r}
+# Find IBD coefficients using Method of Moments procedure.  Include pairwise kinship.
+ibd <- snpgdsIBDMoM(genofile, kinship=TRUE,
+                    sample.id = geno.sample.ids,
+                    snp.id = snpset.ibd,
+                    num.thread = 1)
+
+ibdcoeff <- snpgdsIBDSelection(ibd)     # Pairwise sample comparison
+head(ibdcoeff)
+```
+* Using the IBD pairwise sample relatedness measure, iteratively remove samples that are too similar using a greedy strategy in which the sample with the largest number of related samples is removed. The process is repeated until there are no more pairs of samples with kinship coefficients above the cut-off.
+```{r}
+# Check if there are any candidates for relatedness
+ibdcoeff <- ibdcoeff[ ibdcoeff$kinship >= kin.thresh, ]
+
+# iteratively remove samples with high kinship starting with the sample with the most pairings
+related.samples <- NULL
+while ( nrow(ibdcoeff) > 0 ) {
+
+    # count the number of occurrences of each and take the top one
+    sample.counts <- arrange(count(c(ibdcoeff$ID1, ibdcoeff$ID2)), -freq)
+    rm.sample <- sample.counts[1, 'x']
+    cat("Removing sample", as.character(rm.sample), 'too closely related to', sample.counts[1, 'freq'],'other samples.\n')
+
+    # remove from ibdcoeff and add to list
+    ibdcoeff <- ibdcoeff[ibdcoeff$ID1 != rm.sample & ibdcoeff$ID2 != rm.sample,]
+    related.samples <- c(as.character(rm.sample), related.samples)
+}
+
+# filter genotype and clinical to include only unrelated samples
+genotype <- genotype[ !(rownames(genotype) %in% related.samples), ]
+clinical <- clinical[ !(clinical$FamID %in% related.samples), ]
+
+geno.sample.ids <- rownames(genotype)
+
+cat(length(related.samples), "similar samples removed due to correlation coefficient >=", kin.thresh,"\n") 
+
+print(genotype) # Tutorial: expect all 1401 subjects remain
+```
+
+### Ancestry
+* Plot the first two principal components of the genotype data. (Achieved from `snpgdsPCA` function from `SNPRelate`).
+    * Assuming homogeneity of the sample (other datasets might have to test it first), coming from european ancestry. (This is why 0 SNP will be excluded as result)
+```{r}
+# Checking for ancestry
+
+# Find PCA matrix
+pca <- snpgdsPCA(genofile, sample.id = geno.sample.ids,  snp.id = snpset.ibd, num.thread=1)
+
+# TODO: Scree plot before choosing first 2 PC's
+# TODO: Plot 3D using plotly
+# Create data frame of first two principal comonents
+pctab <- data.frame(sample.id = pca$sample.id,
+                    PC1 = pca$eigenvect[,1],    # the first eigenvector
+                    PC2 = pca$eigenvect[,2],    # the second eigenvector
+                    stringsAsFactors = FALSE)
+
+# Plot the first two principal comonents
+plot(pctab$PC2, pctab$PC1,
+     xlab="Principal Component 2",
+     ylab="Principal Component 1", main = "Ancestry Plot")
+
+# Close GDS file
+closefn.gds(genofile)
+
+# Overwrite old genotype with new filtered version
+save(genotype, genoBim, clinical, file=working.data.fname(3))
+```
+
+### SNP Filtering - [HWE](https://en.wikipedia.org/wiki/Hardy%E2%80%93Weinberg_principle) filtering on control samples
+* Rejection of Hardy-Weinberg equilibrium can be an indication of population substructure or genotyping errors.
+    * Remove SNPs with p-values, corresponding to the HWE test statistic on CAD controls, of less than 1×10<sup>−6</sup>.
+        * HWE on CAD controls due to possible violation of HWE caused by disease association.
+```{r}
+# Hardy-Weinberg SNP filtering on CAD controls
+
+hardy <- 10^-6 # HWE cut-off
+
+CADcontrols <- clinical[ clinical$CAD==0, 'FamID']
+snpsum.colCont <- col.summary( genotype[CADcontrols,])
+HWEuse <- with(snpsum.colCont, !is.na(z.HWE) & ( abs(z.HWE) < abs( qnorm(hardy/2))))
+rm(snpsum.colCont)
+
+HWEuse[is.na(HWEuse)] <- FALSE # Remove NA's as well
+cat(ncol(genotype)-sum(HWEuse),
+    "SNPs will be removed due to high HWE.\n") # 1296 SNPs removed
+
+# Subset genotype and SNP summary data for SNPs that pass HWE criteria
+genotype <- genotype[,HWEuse]
+print(genotype) # 656890 SNPs remain
+
+# Overwrite old genotype with new filtered version
+save(genotype, genoBim, clinical, file=working.data.fname(4))
+```
