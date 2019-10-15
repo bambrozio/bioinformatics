@@ -5,7 +5,7 @@ date: "11/10/2019"
 output: html_document
 ---
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = T)
+knitr::opts_chunk$set(echo = F, warning = F)
 ```
 ## Description 
 * A [GWAS](https://en.wikipedia.org/wiki/Genome-wide_association_study) analysis, with post-analytic visualization and interrogation.
@@ -192,7 +192,7 @@ print(genotype) # 658186 SNPs remain
 save(genotype, snpsum.col, genoBim, clinical, file=working.data.fname(2))
 
 # Sample level filtering
-source("globals.R")
+#source("globals.R")
 
 # load data created in previous snippets
 load(working.data.fname(2))
@@ -491,7 +491,7 @@ GWAA <- function(genodata=genotypes,
                  family=gaussian,
                  filename=NULL,
                  append=FALSE,
-                 workers=getOption("mc.cores",2L),
+                 workers=getOption("mc.cores",8L),
                  flip=TRUE,
                  select.snps=NULL,
                  hosts=NULL,
